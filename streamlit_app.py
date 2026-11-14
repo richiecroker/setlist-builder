@@ -9,8 +9,10 @@ import streamlit as st
 from pypdf import PdfReader, PdfWriter
 
 ROOT_FOLDER_ID = "0B4fd8LwUUi4YYzJ2ZDFwRzJZTlk"
+RESOURCE_KEY = "0-A7jhk6BuC3Tdr-PDudWCTg"  # the value after resourcekey= in the share link
 API_KEY = st.secrets["drive_api_key"]
 API = "https://www.googleapis.com/drive/v3/files"
+HEADERS = {"X-Goog-Drive-Resource-Keys": f"{ROOT_FOLDER_ID}/{RESOURCE_KEY}"}
 
 st.set_page_config(page_title="Music book builder", layout="wide")
 
@@ -29,7 +31,7 @@ def list_all(query, fields):
         if token:
             params["pageToken"] = token
         t = time.time()
-        r = requests.get(API, params=params, timeout=30)
+        r = requests.get(API, params=params, headers=HEADERS, timeout=30)
         print(f"Drive request: {r.status_code} in {time.time() - t:.1f}s", flush=True)
         if not r.ok:
             raise RuntimeError(f"Drive API error {r.status_code}: {r.text}")
@@ -83,6 +85,7 @@ def download_pdf(file_id):
     r = requests.get(
         f"{API}/{file_id}",
         params={"alt": "media", "supportsAllDrives": "true", "key": API_KEY},
+        headers=HEADERS,
         timeout=60,
     )
     r.raise_for_status()
@@ -109,16 +112,6 @@ def build_book(selected: pd.DataFrame) -> bytes:
 st.title("Music book builder")
 
 try:
-    # DEBUG - remove afterwards
-    _meta = requests.get(
-        f"{API}/{ROOT_FOLDER_ID}",
-        params={"fields": "id,name,mimeType", "supportsAllDrives": "true", "key": API_KEY},
-        timeout=30,
-    )
-    st.write("Folder itself:", _meta.status_code, _meta.json() if _meta.ok else _meta.text[:200])
-    
-    _items = list_all(f"'{ROOT_FOLDER_ID}' in parents and trashed=false", "name,mimeType")
-    st.write(f"Everything directly inside: {len(_items)}", [(i["name"], i["mimeType"]) for i in _items[:15]])
     lib = load_library()
 except RuntimeError as e:
     st.error(str(e))
@@ -126,8 +119,8 @@ except RuntimeError as e:
 
 if lib.empty:
     st.warning(
-        "No parts found. Check the folder ID and that the folder is shared "
-        "with 'anyone with the link'."
+        "No parts found. Check the folder ID and resource key, and that filenames "
+        "look like 'Song - Instrument.pdf'."
     )
     st.stop()
 
@@ -139,7 +132,8 @@ table = pd.DataFrame(
         "Include": False,
         "Order": range(1, len(available) + 1),
         "Song": available["song"].values,
-    }
+    },
+    index=available.index,
 )
 
 edited = st.data_editor(
@@ -162,9 +156,7 @@ if missing:
         st.write(missing)
 
 if st.button("Build PDF", disabled=chosen.empty, type="primary"):
-    selected = chosen.merge(
-        available.rename(columns={"song": "Song"}), on="Song", how="left"
-    ).rename(columns={"Song": "song"})
+    selected = available.loc[chosen.index]
     st.session_state["book"] = (part, build_book(selected))
 
 if "book" in st.session_state:
