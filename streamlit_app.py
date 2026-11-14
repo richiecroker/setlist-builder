@@ -12,7 +12,7 @@ from pypdf import PdfReader, PdfWriter
 
 ROOT_FOLDER_ID = "0B4fd8LwUUi4YYzJ2ZDFwRzJZTlk"
 RESOURCE_KEY = "0-A7jhk6BuC3Tdr-PDudWCTg"  # the value after resourcekey= in the share link
-SETLISTS_FOLDER_ID = "0B4fd8LwUUi4YakNkSmRieWpmX00?"
+SETLISTS_FOLDER_ID = "0B4fd8LwUUi4YakNkSmRieWpmX00"
 SETLISTS_RESOURCE_KEY = "0-NtQccyAtb4uVjS26BHrgTA"  # only if the set lists folder link has a resourcekey
 API_KEY = st.secrets["drive_api_key"]
 API = "https://www.googleapis.com/drive/v3/files"
