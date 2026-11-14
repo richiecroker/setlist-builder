@@ -10,15 +10,20 @@ import streamlit as st
 from pypdf import PdfReader, PdfWriter
 
 ROOT_FOLDER_ID = "0B4fd8LwUUi4YYzJ2ZDFwRzJZTlk"
-RESOURCE_KEY = "0-A7jhk6BuC3Tdr-PDudWCTg"  # the value after resourcekey= in the share link
+RESOURCE_KEY = "<RESOURCE_KEY>"  # the value after resourcekey= in the share link
 API_KEY = st.secrets["drive_api_key"]
 API = "https://www.googleapis.com/drive/v3/files"
-HEADERS = {"X-Goog-Drive-Resource-Keys": f"{ROOT_FOLDER_ID}/{RESOURCE_KEY}"}
 
 st.set_page_config(page_title="Music book builder", layout="wide")
 
 
-def list_all(query, fields):
+def rk_headers(*pairs):
+    """Build the resource-key header from (item_id, key) pairs, skipping empty keys."""
+    value = ",".join(f"{i}/{k}" for i, k in pairs if k)
+    return {"X-Goog-Drive-Resource-Keys": value} if value else {}
+
+
+def list_all(query, fields, headers):
     items, token = [], None
     while True:
         params = {
@@ -32,7 +37,7 @@ def list_all(query, fields):
         if token:
             params["pageToken"] = token
         t = time.time()
-        r = requests.get(API, params=params, headers=HEADERS, timeout=30)
+        r = requests.get(API, params=params, headers=headers, timeout=30)
         print(f"Drive request: {r.status_code} in {time.time() - t:.1f}s", flush=True)
         if not r.ok:
             raise RuntimeError(f"Drive API error {r.status_code}: {r.text}")
@@ -46,23 +51,31 @@ def list_all(query, fields):
 @st.cache_data(ttl=600, show_spinner="Reading Drive...")
 def load_library():
     t0 = time.time()
+    root_headers = rk_headers((ROOT_FOLDER_ID, RESOURCE_KEY))
     folders = list_all(
         f"'{ROOT_FOLDER_ID}' in parents "
         "and mimeType='application/vnd.google-apps.folder' and trashed=false",
-        "id,name",
+        "id,name,resourceKey",
+        root_headers,
     )
 
     def folder_files(folder):
-        files = list_all(
-            f"'{folder['id']}' in parents and trashed=false", "id,name,mimeType"
+        headers = rk_headers(
+            (ROOT_FOLDER_ID, RESOURCE_KEY), (folder["id"], folder.get("resourceKey"))
         )
-        return folder["name"], files
+        files = list_all(
+            f"'{folder['id']}' in parents and trashed=false",
+            "id,name,mimeType,resourceKey",
+            headers,
+        )
+        return folder, files
 
     with ThreadPoolExecutor(max_workers=8) as pool:
         results = list(pool.map(folder_files, folders))
 
     rows, skipped, no_separator = [], [], []
-    for song, files in results:
+    for folder, files in results:
+        song = folder["name"]
         for f in files:
             if not f["name"].lower().endswith(".pdf"):
                 skipped.append((song, f["name"], f["mimeType"]))
@@ -73,35 +86,40 @@ def load_library():
                 no_separator.append((song, f["name"]))
                 continue
             rows.append(
-                {"song": song, "part": pieces[-1].strip(), "file_id": f["id"]}
+                {
+                    "song": song,
+                    "part": pieces[-1].strip(),
+                    "file_id": f["id"],
+                    "resource_key": f.get("resourceKey") or "",
+                }
             )
 
     per_folder = Counter(len(files) for _, files in results)
-    fewest = sorted(results, key=lambda x: len(x[1]))[:10]
-
     diag = {
         "folders": len(folders),
+        "folders_with_resource_key": sum(1 for f in folders if f.get("resourceKey")),
         "files_total": sum(len(files) for _, files in results),
         "parsed": len(rows),
+        "files_with_resource_key": sum(1 for r in rows if r["resource_key"]),
         "files_per_folder": dict(sorted(per_folder.items())),
-        "fewest_files": {
-            song: [f["name"] for f in files] for song, files in fewest
-        },
-        "skipped_not_pdf_name": skipped[:15],
+        "empty_folders": [f["name"] for f, files in results if not files][:15],
+        "empty_folder_count": sum(1 for _, files in results if not files),
         "skipped_count": len(skipped),
         "no_separator": no_separator[:15],
-        "no_separator_count": len(no_separator),
         "seconds": round(time.time() - t0, 1),
     }
     print(diag, flush=True)
-    return pd.DataFrame(rows, columns=["song", "part", "file_id"]), diag
+    return (
+        pd.DataFrame(rows, columns=["song", "part", "file_id", "resource_key"]),
+        diag,
+    )
 
 
-def download_pdf(file_id):
+def download_pdf(file_id, resource_key):
     r = requests.get(
         f"{API}/{file_id}",
         params={"alt": "media", "supportsAllDrives": "true", "key": API_KEY},
-        headers=HEADERS,
+        headers=rk_headers((ROOT_FOLDER_ID, RESOURCE_KEY), (file_id, resource_key)),
         timeout=60,
     )
     r.raise_for_status()
@@ -112,7 +130,10 @@ def build_book(selected: pd.DataFrame) -> bytes:
     bar = st.progress(0.0, text="Downloading...")
     with ThreadPoolExecutor(max_workers=6) as pool:
         buffers = []
-        for i, buf in enumerate(pool.map(download_pdf, selected["file_id"]), start=1):
+        for i, buf in enumerate(
+            pool.map(download_pdf, selected["file_id"], selected["resource_key"]),
+            start=1,
+        ):
             buffers.append(buf)
             bar.progress(i / len(selected), text=f"Downloaded {i}/{len(selected)}")
 
@@ -137,7 +158,7 @@ with st.expander("Diagnostics", expanded=lib.empty):
     st.write(diag)
 
 if lib.empty:
-    st.warning("No parts found. See Diagnostics above for the skipped files.")
+    st.warning("No parts found. See Diagnostics above.")
     st.stop()
 
 part_counts = lib["part"].value_counts()
@@ -163,30 +184,3 @@ edited = st.data_editor(
     table,
     key=f"editor_{part}",
     hide_index=True,
-    disabled=["Song"],
-    column_config={
-        "Include": st.column_config.CheckboxColumn(),
-        "Order": st.column_config.NumberColumn(min_value=1, step=1),
-    },
-)
-
-chosen = edited[edited["Include"]].sort_values("Order", kind="stable")
-st.caption(f"{len(chosen)} of {len(available)} songs selected")
-
-missing = sorted(set(lib["song"]) - set(available["song"]))
-if missing:
-    with st.expander(f"{len(missing)} songs have no '{part}' part"):
-        st.write(missing)
-
-if st.button("Build PDF", disabled=chosen.empty, type="primary"):
-    selected = available.loc[chosen.index]
-    st.session_state["book"] = (part, build_book(selected))
-
-if "book" in st.session_state:
-    book_part, data = st.session_state["book"]
-    st.download_button(
-        "Download book",
-        data=data,
-        file_name=f"Music book - {book_part}.pdf",
-        mime="application/pdf",
-    )
