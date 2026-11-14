@@ -1,3 +1,4 @@
+import difflib
 import io
 import re
 import time
@@ -11,6 +12,8 @@ from pypdf import PdfReader, PdfWriter
 
 ROOT_FOLDER_ID = "0B4fd8LwUUi4YYzJ2ZDFwRzJZTlk"
 RESOURCE_KEY = "0-A7jhk6BuC3Tdr-PDudWCTg"  # the value after resourcekey= in the share link
+SETLISTS_FOLDER_ID = "0B4fd8LwUUi4YakNkSmRieWpmX00"
+SETLISTS_RESOURCE_KEY = "0-NtQccyAtb4uVjS26BHrgTA"  # only if the set lists folder link has a resourcekey
 API_KEY = st.secrets["drive_api_key"]
 API = "https://www.googleapis.com/drive/v3/files"
 
@@ -58,6 +61,7 @@ def load_library():
         "id,name,resourceKey",
         root_headers,
     )
+    folders = [f for f in folders if f["id"] != SETLISTS_FOLDER_ID]
 
     def folder_files(folder):
         headers = rk_headers(
@@ -113,6 +117,75 @@ def load_library():
         pd.DataFrame(rows, columns=["song", "part", "file_id", "resource_key"]),
         diag,
     )
+
+
+@st.cache_data(ttl=600, show_spinner="Reading set lists...")
+def load_setlists():
+    docs = list_all(
+        f"'{SETLISTS_FOLDER_ID}' in parents and trashed=false "
+        "and mimeType='application/vnd.google-apps.document'",
+        "id,name,resourceKey",
+        rk_headers(
+            (ROOT_FOLDER_ID, RESOURCE_KEY),
+            (SETLISTS_FOLDER_ID, SETLISTS_RESOURCE_KEY),
+        ),
+    )
+    return sorted(docs, key=lambda d: d["name"].lower())
+
+
+@st.cache_data(ttl=600, show_spinner="Reading set list...")
+def fetch_doc_text(doc_id, resource_key):
+    r = requests.get(
+        f"{API}/{doc_id}/export",
+        params={"mimeType": "text/plain", "key": API_KEY},
+        headers=rk_headers(
+            (ROOT_FOLDER_ID, RESOURCE_KEY),
+            (SETLISTS_FOLDER_ID, SETLISTS_RESOURCE_KEY),
+            (doc_id, resource_key),
+        ),
+        timeout=30,
+    )
+    if not r.ok:
+        raise RuntimeError(f"Drive API error {r.status_code}: {r.text}")
+    r.encoding = "utf-8"
+    return r.text.lstrip("\ufeff")
+
+
+def norm(s):
+    s = s.lower().replace("&", " and ")
+    s = re.sub(r"['’`]", "", s)
+    s = re.sub(r"[^a-z0-9]+", " ", s)
+    return s.strip()
+
+
+def clean_line(line):
+    line = line.strip().lstrip("\ufeff")
+    line = re.sub(r"^\s*(?:\d+\s*[.):-]\s*|[-•*·]\s+)", "", line)
+    return line.strip()
+
+
+def match_song(line, index):
+    """Return the song name for a set list line, or None. Exact match first, then fuzzy."""
+    candidates = [
+        line,
+        re.sub(r"[\(\[].*?[\)\]]", "", line),
+        re.split(r"\s+[-–—]\s+", line)[0],
+    ]
+    for c in candidates:
+        n = norm(c)
+        if n and n in index:
+            return index[n]
+    best, best_score = None, 0.0
+    for c in candidates:
+        n = norm(c)
+        if not n:
+            continue
+        close = difflib.get_close_matches(n, list(index), n=1, cutoff=0.85)
+        if close:
+            score = difflib.SequenceMatcher(None, n, close[0]).ratio()
+            if score > best_score:
+                best, best_score = index[close[0]], score
+    return best
 
 
 def download_pdf(file_id, resource_key):
@@ -171,36 +244,107 @@ part = st.selectbox(
 )
 available = lib[lib["part"] == part].sort_values("song", key=lambda s: s.str.lower())
 
-table = pd.DataFrame(
-    {
-        "Include": False,
-        "Order": range(1, len(available) + 1),
-        "Song": available["song"].values,
-    },
-    index=available.index,
-)
+mode = st.radio("Build from", ["Pick songs", "Set list"], horizontal=True)
 
-edited = st.data_editor(
-    table,
-    key=f"editor_{part}",
-    hide_index=True,
-    disabled=["Song"],
-    column_config={
-        "Include": st.column_config.CheckboxColumn(),
-        "Order": st.column_config.NumberColumn(min_value=1, step=1),
-    },
-)
-
-chosen = edited[edited["Include"]].sort_values("Order", kind="stable")
-st.caption(f"{len(chosen)} of {len(available)} songs selected")
-
-missing = sorted(set(lib["song"]) - set(available["song"]))
-if missing:
-    with st.expander(f"{len(missing)} songs have no '{part}' part"):
-        st.write(missing)
-
-if st.button("Build PDF", disabled=chosen.empty, type="primary"):
+if mode == "Pick songs":
+    table = pd.DataFrame(
+        {
+            "Include": False,
+            "Order": range(1, len(available) + 1),
+            "Song": available["song"].values,
+        },
+        index=available.index,
+    )
+    edited = st.data_editor(
+        table,
+        key=f"editor_pick_{part}",
+        hide_index=True,
+        disabled=["Song"],
+        column_config={
+            "Include": st.column_config.CheckboxColumn(),
+            "Order": st.column_config.NumberColumn(min_value=1, step=1),
+        },
+    )
+    chosen = edited[edited["Include"]].sort_values("Order", kind="stable")
     selected = available.loc[chosen.index]
+
+    missing = sorted(set(lib["song"]) - set(available["song"]))
+    if missing:
+        with st.expander(f"{len(missing)} songs have no '{part}' part"):
+            st.write(missing)
+
+else:
+    try:
+        docs = load_setlists()
+    except RuntimeError as e:
+        st.error(str(e))
+        st.stop()
+    if not docs:
+        st.warning("No Google Docs found in the set lists folder.")
+        st.stop()
+
+    doc = docs[
+        st.selectbox(
+            "Set list", range(len(docs)), format_func=lambda i: docs[i]["name"]
+        )
+    ]
+    try:
+        text = fetch_doc_text(doc["id"], doc.get("resourceKey") or "")
+    except RuntimeError as e:
+        st.error(str(e))
+        st.stop()
+
+    index = {norm(s): s for s in lib["song"].unique()}
+    matched, unmatched = [], []
+    for raw in text.splitlines():
+        line = clean_line(raw)
+        if not line:
+            continue
+        song = match_song(line, index)
+        if song:
+            matched.append((line, song))
+        else:
+            unmatched.append(line)
+
+    by_song = available.drop_duplicates("song").set_index("song")
+    table = pd.DataFrame(
+        [
+            {
+                "Include": song in by_song.index,
+                "Order": n,
+                "Song": song,
+                "Doc line": line,
+                "Has part": song in by_song.index,
+            }
+            for n, (line, song) in enumerate(matched, start=1)
+        ],
+        columns=["Include", "Order", "Song", "Doc line", "Has part"],
+    )
+    edited = st.data_editor(
+        table,
+        key=f"editor_setlist_{doc['id']}_{part}",
+        hide_index=True,
+        disabled=["Song", "Doc line", "Has part"],
+        column_config={
+            "Include": st.column_config.CheckboxColumn(),
+            "Order": st.column_config.NumberColumn(min_value=1, step=1),
+        },
+    )
+    chosen = edited[edited["Include"] & edited["Has part"]].sort_values(
+        "Order", kind="stable"
+    )
+    selected = by_song.loc[chosen["Song"]].reset_index()
+
+    no_part = [s for s in table.loc[~table["Has part"], "Song"]]
+    if no_part:
+        st.warning(f"No '{part}' part for: " + ", ".join(no_part))
+    if unmatched:
+        with st.expander(f"{len(unmatched)} lines didn't match a song"):
+            st.write(unmatched)
+
+st.caption(f"{len(selected)} songs selected")
+
+if st.button("Build PDF", disabled=selected.empty, type="primary"):
     st.session_state["book"] = (part, build_book(selected))
 
 if "book" in st.session_state:
