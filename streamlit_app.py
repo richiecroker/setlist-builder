@@ -10,7 +10,7 @@ import streamlit as st
 from pypdf import PdfReader, PdfWriter
 
 ROOT_FOLDER_ID = "0B4fd8LwUUi4YYzJ2ZDFwRzJZTlk"
-RESOURCE_KEY = "<RESOURCE_KEY>"  # the value after resourcekey= in the share link
+RESOURCE_KEY = "0-A7jhk6BuC3Tdr-PDudWCTg"  # the value after resourcekey= in the share link
 API_KEY = st.secrets["drive_api_key"]
 API = "https://www.googleapis.com/drive/v3/files"
 
@@ -184,3 +184,30 @@ edited = st.data_editor(
     table,
     key=f"editor_{part}",
     hide_index=True,
+    disabled=["Song"],
+    column_config={
+        "Include": st.column_config.CheckboxColumn(),
+        "Order": st.column_config.NumberColumn(min_value=1, step=1),
+    },
+)
+
+chosen = edited[edited["Include"]].sort_values("Order", kind="stable")
+st.caption(f"{len(chosen)} of {len(available)} songs selected")
+
+missing = sorted(set(lib["song"]) - set(available["song"]))
+if missing:
+    with st.expander(f"{len(missing)} songs have no '{part}' part"):
+        st.write(missing)
+
+if st.button("Build PDF", disabled=chosen.empty, type="primary"):
+    selected = available.loc[chosen.index]
+    st.session_state["book"] = (part, build_book(selected))
+
+if "book" in st.session_state:
+    book_part, data = st.session_state["book"]
+    st.download_button(
+        "Download book",
+        data=data,
+        file_name=f"Music book - {book_part}.pdf",
+        mime="application/pdf",
+    )
