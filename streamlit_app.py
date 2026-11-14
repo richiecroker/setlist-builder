@@ -109,6 +109,19 @@ def build_book(selected: pd.DataFrame) -> bytes:
 st.title("Music book builder")
 
 try:
+    # DEBUG - remove afterwards
+    _folders = list_all(
+        f"'{ROOT_FOLDER_ID}' in parents "
+        "and mimeType='application/vnd.google-apps.folder' and trashed=false",
+        "id,name",
+    )
+    st.write(f"Song folders found: {len(_folders)}")
+    if _folders:
+        _files = list_all(
+            f"'{_folders[0]['id']}' in parents and trashed=false",
+            "name,mimeType",
+        )
+        st.write(f"Files in '{_folders[0]['name']}':", [(f["name"], f["mimeType"]) for f in _files])
     lib = load_library()
 except RuntimeError as e:
     st.error(str(e))
