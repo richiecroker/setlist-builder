@@ -12,10 +12,15 @@ from pypdf import PdfReader, PdfWriter
 
 ROOT_FOLDER_ID = "0B4fd8LwUUi4YYzJ2ZDFwRzJZTlk"
 RESOURCE_KEY = "0-A7jhk6BuC3Tdr-PDudWCTg"  # the value after resourcekey= in the share link
-SETLISTS_FOLDER_ID = "0B4fd8LwUUi4YakNkSmRieWpmX00"
-SETLISTS_RESOURCE_KEY = "0-NtQccyAtb4uVjS26BHrgTA"  # only if the set lists folder link has a resourcekey
+SETLISTS_FOLDER_ID = "0B4fd8LwUUi4YakNkSmRieWpmX00?"
+SETLISTS_RESOURCE_KEY = "0-NtQccyAtb4uVjS26BHrgTA&q"  # only if the set lists folder link has a resourcekey
 API_KEY = st.secrets["drive_api_key"]
 API = "https://www.googleapis.com/drive/v3/files"
+
+FOLDER_MIME = "application/vnd.google-apps.folder"
+DOC_MIME = "application/vnd.google-apps.document"
+SHORTCUT_MIME = "application/vnd.google-apps.shortcut"
+DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
 
 st.set_page_config(page_title="Music book builder", layout="wide")
 
@@ -57,7 +62,7 @@ def load_library():
     root_headers = rk_headers((ROOT_FOLDER_ID, RESOURCE_KEY))
     folders = list_all(
         f"'{ROOT_FOLDER_ID}' in parents "
-        "and mimeType='application/vnd.google-apps.folder' and trashed=false",
+        f"and mimeType='{FOLDER_MIME}' and trashed=false",
         "id,name,resourceKey",
         root_headers,
     )
@@ -119,30 +124,78 @@ def load_library():
     )
 
 
+def doc_date(label):
+    """yyyy-mm-dd from the doc's own title (the last part of its path), or ''."""
+    m = DATE_RE.search(label.split(" / ")[-1])
+    return m.group(0) if m else ""
+
+
 @st.cache_data(ttl=600, show_spinner="Reading set lists...")
 def load_setlists():
-    docs = list_all(
-        f"'{SETLISTS_FOLDER_ID}' in parents and trashed=false "
-        "and mimeType='application/vnd.google-apps.document'",
-        "id,name,resourceKey",
-        rk_headers(
+    docs, other, folders_seen = [], Counter(), [0]
+
+    def walk(folder_id, path, keys, depth):
+        folders_seen[0] += 1
+        items = list_all(
+            f"'{folder_id}' in parents and trashed=false",
+            "id,name,mimeType,resourceKey,shortcutDetails",
+            rk_headers(*keys),
+        )
+        for it in items:
+            mime = it["mimeType"]
+            label = " / ".join(path + [it["name"]])
+            item_keys = keys + ((it["id"], it.get("resourceKey")),)
+            if mime == FOLDER_MIME:
+                if depth < 3:
+                    walk(it["id"], path + [it["name"]], item_keys, depth + 1)
+            elif mime == DOC_MIME:
+                docs.append({"id": it["id"], "name": label, "keys": item_keys})
+            elif mime == SHORTCUT_MIME:
+                sd = it.get("shortcutDetails") or {}
+                if sd.get("targetMimeType") == DOC_MIME:
+                    target_keys = keys + ((sd["targetId"], sd.get("targetResourceKey")),)
+                    docs.append(
+                        {"id": sd["targetId"], "name": label, "keys": target_keys}
+                    )
+                else:
+                    other[f"shortcut to {sd.get('targetMimeType')}"] += 1
+            else:
+                other[mime] += 1
+
+    walk(
+        SETLISTS_FOLDER_ID,
+        [],
+        (
             (ROOT_FOLDER_ID, RESOURCE_KEY),
             (SETLISTS_FOLDER_ID, SETLISTS_RESOURCE_KEY),
         ),
+        0,
     )
-    return sorted(docs, key=lambda d: d["name"].lower())
+
+    dated = sorted(
+        [d for d in docs if doc_date(d["name"])],
+        key=lambda d: (doc_date(d["name"]), d["name"].lower()),
+        reverse=True,
+    )
+    undated = sorted(
+        [d for d in docs if not doc_date(d["name"])],
+        key=lambda d: d["name"].lower(),
+    )
+    diag = {
+        "google_docs_found": len(docs),
+        "undated": len(undated),
+        "folders_searched": folders_seen[0],
+        "skipped_other_types": dict(other),
+    }
+    return dated + undated, diag
 
 
 @st.cache_data(ttl=600, show_spinner="Reading set list...")
-def fetch_doc_text(doc_id, resource_key):
+def fetch_doc_text(doc_id, keys):
     r = requests.get(
         f"{API}/{doc_id}/export",
         params={"mimeType": "text/plain", "key": API_KEY},
-        headers=rk_headers(
-            (ROOT_FOLDER_ID, RESOURCE_KEY),
-            (SETLISTS_FOLDER_ID, SETLISTS_RESOURCE_KEY),
-            (doc_id, resource_key),
-        ),
+        headers=rk_headers(*keys),
         timeout=30,
     )
     if not r.ok:
@@ -275,10 +328,13 @@ if mode == "Pick songs":
 
 else:
     try:
-        docs = load_setlists()
+        docs, setlist_diag = load_setlists()
     except RuntimeError as e:
         st.error(str(e))
         st.stop()
+
+    with st.expander("Set list diagnostics", expanded=not docs):
+        st.write(setlist_diag)
     if not docs:
         st.warning("No Google Docs found in the set lists folder.")
         st.stop()
@@ -289,7 +345,7 @@ else:
         )
     ]
     try:
-        text = fetch_doc_text(doc["id"], doc.get("resourceKey") or "")
+        text = fetch_doc_text(doc["id"], doc["keys"])
     except RuntimeError as e:
         st.error(str(e))
         st.stop()
