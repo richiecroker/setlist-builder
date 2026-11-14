@@ -9,6 +9,7 @@ import streamlit as st
 from pypdf import PdfReader, PdfWriter
 
 ROOT_FOLDER_ID = "https://drive.google.com/drive/u/0/folders/0B4fd8LwUUi4YYzJ2ZDFwRzJZTlk"
+st.write(repr(ROOT_FOLDER_ID), len(ROOT_FOLDER_ID))
 API_KEY = st.secrets["drive_api_key"]
 API = "https://www.googleapis.com/drive/v3/files"
 
