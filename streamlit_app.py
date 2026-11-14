@@ -248,7 +248,10 @@ def download_pdf(file_id, resource_key):
         headers=rk_headers((ROOT_FOLDER_ID, RESOURCE_KEY), (file_id, resource_key)),
         timeout=60,
     )
-    r.raise_for_status()
+    if not r.ok:
+        st.error(f"Google Drive error {r.status_code}: {r.text}")
+        r.raise_for_status()
+    
     return io.BytesIO(r.content)
 
 
