@@ -249,8 +249,9 @@ def download_pdf(file_id, resource_key):
         timeout=60,
     )
     if not r.ok:
-        st.error(f"Google Drive error {r.status_code}: {r.text}")
-        r.raise_for_status()
+        raise RuntimeError(
+            f"Google Drive error {r.status_code}: {r.text}"
+        )
     
     return io.BytesIO(r.content)
 
