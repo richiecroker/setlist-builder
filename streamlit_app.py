@@ -50,35 +50,43 @@ def load_library():
         "and mimeType='application/vnd.google-apps.folder' and trashed=false",
         "id,name",
     )
-    print(f"Found {len(folders)} folders in {time.time() - t0:.1f}s", flush=True)
-    folder_names = {f["id"]: f["name"] for f in folders}
-    ids = list(folder_names)
 
-    def query_chunk(chunk):
-        parents_q = " or ".join(f"'{fid}' in parents" for fid in chunk)
-        return list_all(
-            f"({parents_q}) and mimeType='application/pdf' and trashed=false",
-            "id,name,parents",
+    def folder_files(folder):
+        files = list_all(
+            f"'{folder['id']}' in parents and trashed=false", "id,name,mimeType"
         )
+        return folder["name"], files
 
-    chunks = [ids[i : i + 10] for i in range(0, len(ids), 10)]
     with ThreadPoolExecutor(max_workers=8) as pool:
-        pdfs = [p for result in pool.map(query_chunk, chunks) for p in result]
-    print(f"Found {len(pdfs)} PDFs in {time.time() - t0:.1f}s total", flush=True)
+        results = list(pool.map(folder_files, folders))
 
-    rows = []
-    for p in pdfs:
-        parent = next((x for x in p.get("parents", []) if x in folder_names), None)
-        if parent is None:
-            continue
-        stem = re.sub(r"\.pdf$", "", p["name"], flags=re.I)
-        _, sep, part = stem.rpartition(" - ")
-        if not sep:
-            continue
-        rows.append(
-            {"song": folder_names[parent], "part": part.strip(), "file_id": p["id"]}
-        )
-    return pd.DataFrame(rows, columns=["song", "part", "file_id"])
+    rows, skipped, no_separator = [], [], []
+    for song, files in results:
+        for f in files:
+            if not f["name"].lower().endswith(".pdf"):
+                skipped.append((song, f["name"], f["mimeType"]))
+                continue
+            stem = re.sub(r"\.pdf$", "", f["name"], flags=re.I)
+            pieces = re.split(r"\s+[-–—]\s+", stem)
+            if len(pieces) < 2:
+                no_separator.append((song, f["name"]))
+                continue
+            rows.append(
+                {"song": song, "part": pieces[-1].strip(), "file_id": f["id"]}
+            )
+
+    diag = {
+        "folders": len(folders),
+        "files_total": sum(len(files) for _, files in results),
+        "parsed": len(rows),
+        "skipped_not_pdf_name": skipped[:15],
+        "skipped_count": len(skipped),
+        "no_separator": no_separator[:15],
+        "no_separator_count": len(no_separator),
+        "seconds": round(time.time() - t0, 1),
+    }
+    print(diag, flush=True)
+    return pd.DataFrame(rows, columns=["song", "part", "file_id"]), diag
 
 
 def download_pdf(file_id):
@@ -112,32 +120,16 @@ def build_book(selected: pd.DataFrame) -> bytes:
 st.title("Music book builder")
 
 try:
-    # DEBUG - remove afterwards
-    _folders = list_all(
-        f"'{ROOT_FOLDER_ID}' in parents "
-        "and mimeType='application/vnd.google-apps.folder' and trashed=false",
-        "id,name",
-    )
-    st.write(f"Song folders found: {len(_folders)}", [f["name"] for f in _folders[:5]])
-    if _folders:
-        _files = list_all(
-            f"'{_folders[0]['id']}' in parents and trashed=false",
-            "name,mimeType",
-        )
-        st.write(
-            f"Items in '{_folders[0]['name']}': {len(_files)}",
-            [(f["name"], f["mimeType"]) for f in _files[:10]],
-        )
-    lib = load_library()
+    lib, diag = load_library()
 except RuntimeError as e:
     st.error(str(e))
     st.stop()
 
+with st.expander("Diagnostics", expanded=lib.empty):
+    st.write(diag)
+
 if lib.empty:
-    st.warning(
-        "No parts found. Check the folder ID and resource key, and that filenames "
-        "look like 'Song - Instrument.pdf'."
-    )
+    st.warning("No parts found. See Diagnostics above for the skipped files.")
     st.stop()
 
 part = st.selectbox("Part", sorted(lib["part"].unique(), key=str.lower))
