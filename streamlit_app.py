@@ -243,17 +243,35 @@ def match_song(line, index):
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def download_pdf(file_id, resource_key):
+    url = f"{API}/{file_id}"
+
     r = requests.get(
-        f"{API}/{file_id}",
-        params={"alt": "media", "supportsAllDrives": "true", "key": API_KEY},
-        headers=rk_headers((ROOT_FOLDER_ID, RESOURCE_KEY), (file_id, resource_key)),
+        url,
+        params={
+            "alt": "media",
+            "supportsAllDrives": "true",
+            "key": API_KEY,
+        },
+        headers=rk_headers(
+            (ROOT_FOLDER_ID, RESOURCE_KEY),
+            (file_id, resource_key),
+        ),
         timeout=60,
     )
+
+    print(
+        f"PDF download: file={file_id}, "
+        f"status={r.status_code}, "
+        f"content_type={r.headers.get('Content-Type')}",
+        flush=True,
+    )
+
     if not r.ok:
         raise RuntimeError(
-            f"Google Drive download error {r.status_code} for file {file_id}: "
-            f"{r.text[:1000]}"
+            f"Google Drive error {r.status_code} "
+            f"for file {file_id}: {r.text[:500]}"
         )
+
     return r.content
 
 
