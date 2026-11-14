@@ -7,7 +7,7 @@ import requests
 import streamlit as st
 from pypdf import PdfReader, PdfWriter
 
-ROOT_FOLDER_ID = "<ROOT_FOLDER_ID>"
+ROOT_FOLDER_ID = "https://drive.google.com/drive/u/0/folders/0B4fd8LwUUi4YYzJ2ZDFwRzJZTlk"
 API_KEY = st.secrets["drive_api_key"]
 API = "https://www.googleapis.com/drive/v3/files"
 
@@ -28,7 +28,9 @@ def list_all(query, fields):
         if token:
             params["pageToken"] = token
         r = requests.get(API, params=params, timeout=30)
-        r.raise_for_status()
+        if not r.ok:
+            st.error(f"Drive API error {r.status_code}: {r.text}")
+            st.stop()
         data = r.json()
         items += data["files"]
         token = data.get("nextPageToken")
