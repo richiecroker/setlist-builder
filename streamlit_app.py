@@ -1,6 +1,7 @@
 import io
 import re
 import time
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 
 import pandas as pd
@@ -75,10 +76,17 @@ def load_library():
                 {"song": song, "part": pieces[-1].strip(), "file_id": f["id"]}
             )
 
+    per_folder = Counter(len(files) for _, files in results)
+    fewest = sorted(results, key=lambda x: len(x[1]))[:10]
+
     diag = {
         "folders": len(folders),
         "files_total": sum(len(files) for _, files in results),
         "parsed": len(rows),
+        "files_per_folder": dict(sorted(per_folder.items())),
+        "fewest_files": {
+            song: [f["name"] for f in files] for song, files in fewest
+        },
         "skipped_not_pdf_name": skipped[:15],
         "skipped_count": len(skipped),
         "no_separator": no_separator[:15],
@@ -132,7 +140,14 @@ if lib.empty:
     st.warning("No parts found. See Diagnostics above for the skipped files.")
     st.stop()
 
-part = st.selectbox("Part", sorted(lib["part"].unique(), key=str.lower))
+part_counts = lib["part"].value_counts()
+parts = sorted(part_counts.index, key=str.lower)
+part = st.selectbox(
+    "Part",
+    parts,
+    index=parts.index(part_counts.idxmax()),
+    format_func=lambda p: f"{p} ({part_counts[p]} songs)",
+)
 available = lib[lib["part"] == part].sort_values("song", key=lambda s: s.str.lower())
 
 table = pd.DataFrame(
