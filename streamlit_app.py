@@ -241,35 +241,45 @@ def match_song(line, index):
     return best
 
 
-@st.cache_data(ttl=3600, show_spinner=False)
+@@st.cache_data(ttl=3600, show_spinner=False)
 def download_pdf(file_id, resource_key):
-    url = f"{API}/{file_id}"
+    url = "https://drive.google.com/uc"
+
+    params = {
+        "export": "download",
+        "id": file_id,
+    }
+
+    if resource_key:
+        params["resourcekey"] = resource_key
 
     r = requests.get(
         url,
-        params={
-            "alt": "media",
-            "supportsAllDrives": "true",
-            "key": API_KEY,
-        },
-        headers=rk_headers(
-            (ROOT_FOLDER_ID, RESOURCE_KEY),
-            (file_id, resource_key),
-        ),
+        params=params,
         timeout=60,
+        allow_redirects=True,
     )
 
     print(
         f"PDF download: file={file_id}, "
         f"status={r.status_code}, "
-        f"content_type={r.headers.get('Content-Type')}",
+        f"content_type={r.headers.get('Content-Type')}, "
+        f"final_url={r.url.split('?')[0]}",
         flush=True,
     )
 
     if not r.ok:
         raise RuntimeError(
-            f"Google Drive error {r.status_code} "
-            f"for file {file_id}: {r.text[:500]}"
+            f"Google Drive download error {r.status_code}: "
+            f"{r.text[:500]}"
+        )
+
+    if not r.content.startswith(b"%PDF-"):
+        raise RuntimeError(
+            f"Google Drive returned something other than a PDF "
+            f"for file {file_id}. "
+            f"Content type: {r.headers.get('Content-Type')}. "
+            f"Response: {r.text[:500]}"
         )
 
     return r.content
