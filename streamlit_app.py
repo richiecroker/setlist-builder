@@ -79,7 +79,7 @@ def load_library():
         )
         return folder, files
 
-    with ThreadPoolExecutor(max_workers=8) as pool:
+    with ThreadPoolExecutor(max_workers=4) as pool:
         results = list(pool.map(folder_files, folders))
 
     rows, skipped, no_separator = [], [], []
@@ -241,6 +241,7 @@ def match_song(line, index):
     return best
 
 
+@st.cache_data(ttl=3600, show_spinner=False)
 def download_pdf(file_id, resource_key):
     r = requests.get(
         f"{API}/{file_id}",
@@ -250,21 +251,21 @@ def download_pdf(file_id, resource_key):
     )
     if not r.ok:
         raise RuntimeError(
-            f"Google Drive error {r.status_code}: {r.text}"
+            f"Google Drive download error {r.status_code} for file {file_id}: "
+            f"{r.text[:1000]}"
         )
-    
-    return io.BytesIO(r.content)
+    return r.content
 
 
 def build_book(selected: pd.DataFrame) -> bytes:
     bar = st.progress(0.0, text="Downloading...")
-    with ThreadPoolExecutor(max_workers=6) as pool:
+    with ThreadPoolExecutor(max_workers=2) as pool:
         buffers = []
         for i, buf in enumerate(
             pool.map(download_pdf, selected["file_id"], selected["resource_key"]),
             start=1,
         ):
-            buffers.append(buf)
+            buffers.append(io.BytesIO(buf))
             bar.progress(i / len(selected), text=f"Downloaded {i}/{len(selected)}")
 
     writer = PdfWriter()
@@ -405,7 +406,10 @@ else:
 st.caption(f"{len(selected)} songs selected")
 
 if st.button("Build PDF", disabled=selected.empty, type="primary"):
-    st.session_state["book"] = (part, build_book(selected))
+    try:
+        st.session_state["book"] = (part, build_book(selected))
+    except (RuntimeError, requests.RequestException) as e:
+        st.error(str(e))
 
 if "book" in st.session_state:
     book_part, data = st.session_state["book"]
