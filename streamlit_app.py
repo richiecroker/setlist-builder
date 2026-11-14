@@ -110,18 +110,15 @@ st.title("Music book builder")
 
 try:
     # DEBUG - remove afterwards
-    _folders = list_all(
-        f"'{ROOT_FOLDER_ID}' in parents "
-        "and mimeType='application/vnd.google-apps.folder' and trashed=false",
-        "id,name",
+    _meta = requests.get(
+        f"{API}/{ROOT_FOLDER_ID}",
+        params={"fields": "id,name,mimeType", "supportsAllDrives": "true", "key": API_KEY},
+        timeout=30,
     )
-    st.write(f"Song folders found: {len(_folders)}")
-    if _folders:
-        _files = list_all(
-            f"'{_folders[0]['id']}' in parents and trashed=false",
-            "name,mimeType",
-        )
-        st.write(f"Files in '{_folders[0]['name']}':", [(f["name"], f["mimeType"]) for f in _files])
+    st.write("Folder itself:", _meta.status_code, _meta.json() if _meta.ok else _meta.text[:200])
+    
+    _items = list_all(f"'{ROOT_FOLDER_ID}' in parents and trashed=false", "name,mimeType")
+    st.write(f"Everything directly inside: {len(_items)}", [(i["name"], i["mimeType"]) for i in _items[:15]])
     lib = load_library()
 except RuntimeError as e:
     st.error(str(e))
