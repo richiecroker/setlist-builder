@@ -1,5 +1,6 @@
 import io
 import re
+import time
 from concurrent.futures import ThreadPoolExecutor
 
 import pandas as pd
@@ -27,10 +28,11 @@ def list_all(query, fields):
         }
         if token:
             params["pageToken"] = token
+        t = time.time()
         r = requests.get(API, params=params, timeout=30)
+        print(f"Drive request: {r.status_code} in {time.time() - t:.1f}s", flush=True)
         if not r.ok:
-            st.error(f"Drive API error {r.status_code}: {r.text}")
-            st.stop()
+            raise RuntimeError(f"Drive API error {r.status_code}: {r.text}")
         data = r.json()
         items += data["files"]
         token = data.get("nextPageToken")
@@ -40,22 +42,27 @@ def list_all(query, fields):
 
 @st.cache_data(ttl=600, show_spinner="Reading Drive...")
 def load_library():
+    t0 = time.time()
     folders = list_all(
         f"'{ROOT_FOLDER_ID}' in parents "
         "and mimeType='application/vnd.google-apps.folder' and trashed=false",
         "id,name",
     )
+    print(f"Found {len(folders)} folders in {time.time() - t0:.1f}s", flush=True)
     folder_names = {f["id"]: f["name"] for f in folders}
     ids = list(folder_names)
 
-    # An API key has no "all files" scope, so query PDFs by parent, in chunks.
-    pdfs = []
-    for i in range(0, len(ids), 20):
-        parents_q = " or ".join(f"'{fid}' in parents" for fid in ids[i : i + 20])
-        pdfs += list_all(
+    def query_chunk(chunk):
+        parents_q = " or ".join(f"'{fid}' in parents" for fid in chunk)
+        return list_all(
             f"({parents_q}) and mimeType='application/pdf' and trashed=false",
             "id,name,parents",
         )
+
+    chunks = [ids[i : i + 10] for i in range(0, len(ids), 10)]
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        pdfs = [p for result in pool.map(query_chunk, chunks) for p in result]
+    print(f"Found {len(pdfs)} PDFs in {time.time() - t0:.1f}s total", flush=True)
 
     rows = []
     for p in pdfs:
@@ -101,9 +108,17 @@ def build_book(selected: pd.DataFrame) -> bytes:
 
 st.title("Music book builder")
 
-lib = load_library()
+try:
+    lib = load_library()
+except RuntimeError as e:
+    st.error(str(e))
+    st.stop()
+
 if lib.empty:
-    st.warning("No parts found. Check the root folder ID and that the folder is shared with 'anyone with the link'.")
+    st.warning(
+        "No parts found. Check the folder ID and that the folder is shared "
+        "with 'anyone with the link'."
+    )
     st.stop()
 
 part = st.selectbox("Part", sorted(lib["part"].unique(), key=str.lower))
