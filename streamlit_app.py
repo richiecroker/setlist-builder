@@ -9,6 +9,7 @@ import pandas as pd
 import requests
 import streamlit as st
 from pypdf import PdfReader, PdfWriter
+from pypdf.constants import PageLabelStyle
 
 ROOT_FOLDER_ID = "0B4fd8LwUUi4YYzJ2ZDFwRzJZTlk"
 RESOURCE_KEY = "0-A7jhk6BuC3Tdr-PDudWCTg"  # the value after resourcekey= in the share link
@@ -285,7 +286,7 @@ def download_pdf(file_id, resource_key):
     return r.content
 
 
-def build_book(selected: pd.DataFrame) -> bytes:
+def build_book(selected: pd.DataFrame, pad_odd: bool, forscore_metadata: bool, part: str) -> bytes:
     bar = st.progress(0.0, text="Downloading...")
     with ThreadPoolExecutor(max_workers=2) as pool:
         buffers = []
@@ -297,8 +298,42 @@ def build_book(selected: pd.DataFrame) -> bytes:
             bar.progress(i / len(selected), text=f"Downloaded {i}/{len(selected)}")
 
     writer = PdfWriter()
-    for song, buf in zip(selected["song"], buffers):
-        writer.append(PdfReader(buf), outline_item=song)
+    song_names = selected["song"].tolist()
+    for i, (song, buf) in enumerate(zip(song_names, buffers)):
+        reader = PdfReader(buf)
+        start_page = len(writer.pages)
+        page_count = len(reader.pages)
+        writer.append(reader, outline_item=song)
+
+        if forscore_metadata:
+            writer.set_page_label(
+                start_page,
+                start_page + page_count - 1,
+                style=PageLabelStyle.DECIMAL,
+                start=1,
+            )
+
+        if pad_odd and page_count % 2 == 1 and i < len(song_names) - 1:
+            first_page = writer.pages[start_page]
+            writer.add_blank_page(
+                width=float(first_page.mediabox.width),
+                height=float(first_page.mediabox.height),
+            )
+            if forscore_metadata:
+                writer.set_page_label(
+                    len(writer.pages) - 1,
+                    len(writer.pages) - 1,
+                    prefix="Blank",
+                )
+
+    if forscore_metadata:
+        writer.add_metadata(
+            {
+                "/Title": f"Music book - {part}",
+                "/Creator": "Music book builder (Streamlit)",
+            }
+        )
+
     out = io.BytesIO()
     writer.write(out)
     bar.empty()
@@ -433,9 +468,12 @@ else:
 
 st.caption(f"{len(selected)} songs selected")
 
+pad_odd = st.checkbox("Insert blank pages after odd-page songs", value=False)
+forscore_metadata = st.checkbox("Experimental forScore title and page labels", value=False)
+
 if st.button("Build PDF", disabled=selected.empty, type="primary"):
     try:
-        st.session_state["book"] = (part, build_book(selected))
+        st.session_state["book"] = (part, build_book(selected, pad_odd, forscore_metadata, part))
     except (RuntimeError, requests.RequestException) as e:
         st.error(str(e))
 
