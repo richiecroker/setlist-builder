@@ -6,6 +6,7 @@ from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 
 import pandas as pd
+from bs4 import BeautifulSoup
 import requests
 import streamlit as st
 from pypdf import PdfReader, PdfWriter
@@ -16,6 +17,7 @@ RESOURCE_KEY = "0-A7jhk6BuC3Tdr-PDudWCTg"  # the value after resourcekey= in the
 SETLISTS_FOLDER_ID = "0B4fd8LwUUi4YakNkSmRieWpmX00"
 SETLISTS_RESOURCE_KEY = "0-NtQccyAtb4uVjS26BHrgTA"  # only if the set lists folder link has a resourcekey
 ALLOWED_PARTS = ["Soprano Saxophone", "Alto Saxophone 1", "Alto Saxophone 2", "Tenor Saxophone", "Baritone Saxophone", "Lead Vocals and Chords", "Lead Vocals, Chords and Keyboard", "Percussion", "Bass Guitar", "Lyrics"]  # Edit to suit your library
+
 API_KEY = st.secrets["drive_api_key"]
 API = "https://www.googleapis.com/drive/v3/files"
 
@@ -194,53 +196,55 @@ def load_setlists():
 
 @st.cache_data(ttl=600, show_spinner="Reading set list...")
 def fetch_doc_lines(doc_id, keys):
-    """Read first-column entries from Google Docs tables, in document order."""
+    """Export a Google Doc as HTML and read the first column of its tables."""
     r = requests.get(
-        f"https://docs.googleapis.com/v1/documents/{doc_id}",
-        params={"key": API_KEY},
+        f"{API}/{doc_id}/export",
+        params={"mimeType": "text/html", "key": API_KEY},
         headers=rk_headers(*keys),
         timeout=30,
     )
     if not r.ok:
         raise RuntimeError(
-            f"Google Docs API error {r.status_code}: {r.text[:500]}. "
-            "Check that the Google Docs API is enabled and the document is "
-            "accessible using your API key."
+            f"Google Drive HTML export error {r.status_code}: {r.text[:500]}"
         )
-    doc = r.json()
 
-    def paragraphs(elements):
-        """Extract text from paragraphs, including nested table content."""
+    soup = BeautifulSoup(r.content, "html.parser")
+    tables = soup.find_all("table")
+    if tables:
         lines = []
-        for element in elements:
-            if "paragraph" in element:
-                value = "".join(
-                    run.get("textRun", {}).get("content", "")
-                    for run in element["paragraph"].get("elements", [])
-                ).strip()
-                if value:
-                    lines.extend(value.splitlines())
-            elif "table" in element:
-                for row in element["table"].get("tableRows", []):
-                    for cell in row.get("tableCells", []):
-                        lines.extend(paragraphs(cell.get("content", [])))
+        for table in tables:
+            for row in table.find_all("tr"):
+                # Only direct cells of this row, not cells from nested tables.
+                cells = row.find_all(["td", "th"], recursive=False)
+                if not cells:
+                    continue
+                cell = cells[0]
+                # Preserve separate paragraphs/line breaks within a cell.
+                for break_tag in cell.find_all("br"):
+                    break_tag.replace_with("\n")
+                for block in cell.find_all(["p", "div", "li"]):
+                    block.insert_after("\n")
+                lines.extend(
+                    line.strip()
+                    for line in cell.get_text().splitlines()
+                    if line.strip()
+                )
         return lines
 
-    content = doc.get("body", {}).get("content", [])
-    table_entries = []
-    for element in content:
-        table = element.get("table")
-        if table is None:
-            continue
-        for row in table.get("tableRows", []):
-            cells = row.get("tableCells", [])
-            if cells:
-                table_entries.extend(paragraphs(cells[0].get("content", [])))
-
-    # Preserve support for set lists written as ordinary paragraphs.
-    if not any("table" in element for element in content):
-        return paragraphs(content)
-    return table_entries
+    # For set lists without tables, retain the original plain-text behaviour.
+    text_response = requests.get(
+        f"{API}/{doc_id}/export",
+        params={"mimeType": "text/plain", "key": API_KEY},
+        headers=rk_headers(*keys),
+        timeout=30,
+    )
+    if not text_response.ok:
+        raise RuntimeError(
+            f"Google Drive text export error {text_response.status_code}: "
+            f"{text_response.text[:500]}"
+        )
+    text_response.encoding = "utf-8"
+    return text_response.text.lstrip("\ufeff").splitlines()
 
 
 def norm(s):
