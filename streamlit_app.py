@@ -1,3 +1,5 @@
+
+
 import difflib
 import io
 import re
@@ -17,7 +19,6 @@ RESOURCE_KEY = "0-A7jhk6BuC3Tdr-PDudWCTg"  # the value after resourcekey= in the
 SETLISTS_FOLDER_ID = "0B4fd8LwUUi4YakNkSmRieWpmX00"
 SETLISTS_RESOURCE_KEY = "0-NtQccyAtb4uVjS26BHrgTA"  # only if the set lists folder link has a resourcekey
 ALLOWED_PARTS = ["Soprano Saxophone", "Alto Saxophone 1", "Alto Saxophone 2", "Tenor Saxophone", "Baritone Saxophone", "Lead Vocals and Chords", "Lead Vocals, Chords and Keyboard", "Percussion", "Bass Guitar", "Lyrics"]  # Edit to suit your library
-
 API_KEY = st.secrets["drive_api_key"]
 API = "https://www.googleapis.com/drive/v3/files"
 
@@ -247,6 +248,24 @@ def fetch_doc_lines(doc_id, keys):
     return text_response.text.lstrip("\ufeff").splitlines()
 
 
+
+def fetch_setlist_pdf(doc_id, keys):
+    """Fetch the current Google Doc as a PDF, without caching."""
+    r = requests.get(
+        f"{API}/{doc_id}/export",
+        params={"mimeType": "application/pdf", "key": API_KEY},
+        headers=rk_headers(*keys),
+        timeout=60,
+    )
+    if not r.ok:
+        raise RuntimeError(
+            f"Google Drive set list PDF export error {r.status_code}: {r.text[:500]}"
+        )
+    if not r.content.startswith(b"%PDF-"):
+        raise RuntimeError("Google Drive did not return a PDF for the set list.")
+    return r.content
+
+
 def norm(s):
     s = s.lower().replace("&", " and ")
     s = re.sub(r"['’`]", "", s)
@@ -328,7 +347,7 @@ def download_pdf(file_id, resource_key):
     return r.content
 
 
-def build_book(selected: pd.DataFrame, pad_odd: bool, forscore_metadata: bool, part: str) -> bytes:
+def build_book(selected: pd.DataFrame, pad_odd: bool, forscore_metadata: bool, part: str, setlist_pdf=None) -> bytes:
     bar = st.progress(0.0, text="Downloading...")
     with ThreadPoolExecutor(max_workers=2) as pool:
         buffers = []
@@ -340,6 +359,8 @@ def build_book(selected: pd.DataFrame, pad_odd: bool, forscore_metadata: bool, p
             bar.progress(i / len(selected), text=f"Downloaded {i}/{len(selected)}")
 
     writer = PdfWriter()
+    if setlist_pdf is not None:
+        writer.append(PdfReader(io.BytesIO(setlist_pdf)), outline_item="Set list")
     song_names = selected["song"].tolist()
     for i, (song, buf) in enumerate(zip(song_names, buffers)):
         reader = PdfReader(buf)
@@ -519,10 +540,18 @@ st.caption(f"{len(selected)} songs selected")
 
 pad_odd = st.checkbox("Insert blank pages after odd-page songs", value=False)
 forscore_metadata = st.checkbox("Experimental forScore title and page labels", value=False)
+include_setlist = (
+    st.checkbox("Include current set list as front page", value=True)
+    if mode == "Set list" else False
+)
 
 if st.button("Build PDF", disabled=selected.empty, type="primary"):
     try:
-        st.session_state["book"] = (part, build_book(selected, pad_odd, forscore_metadata, part))
+        setlist_pdf = fetch_setlist_pdf(doc["id"], doc["keys"]) if include_setlist else None
+        st.session_state["book"] = (
+            part,
+            build_book(selected, pad_odd, forscore_metadata, part, setlist_pdf),
+        )
     except (RuntimeError, requests.RequestException) as e:
         st.error(str(e))
 
