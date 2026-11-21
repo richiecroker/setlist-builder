@@ -19,6 +19,9 @@ RESOURCE_KEY = "0-A7jhk6BuC3Tdr-PDudWCTg"  # the value after resourcekey= in the
 SETLISTS_FOLDER_ID = "0B4fd8LwUUi4YakNkSmRieWpmX00"
 SETLISTS_RESOURCE_KEY = "0-NtQccyAtb4uVjS26BHrgTA"  # only if the set lists folder link has a resourcekey
 ALLOWED_PARTS = ["Soprano Saxophone", "Alto Saxophone 1", "Alto Saxophone 2", "Tenor Saxophone", "Baritone Saxophone", "Lead Vocals and Chords", "Lead Vocals, Chords and Keyboard", "Percussion", "Bass Guitar", "Lyrics"]  # Edit to suit your library
+VOCAL_PART = "Lead Vocals and Chords"
+KEYBOARD_PART = "Lead Vocals, Chords and Keyboards"
+COMBINED_PART = "Lead Vocals and Chords / Keyboards"
 API_KEY = st.secrets["drive_api_key"]
 API = "https://www.googleapis.com/drive/v3/files"
 
@@ -347,7 +350,8 @@ def download_pdf(file_id, resource_key):
     return r.content
 
 
-def build_book(selected: pd.DataFrame, pad_odd: bool, forscore_metadata: bool, part: str, setlist_pdf=None) -> bytes:
+def build_book(selected: pd.DataFrame, book_layout: bool, forscore_metadata: bool,
+               part: str, setlist_pdf=None) -> bytes:
     bar = st.progress(0.0, text="Downloading...")
     with ThreadPoolExecutor(max_workers=2) as pool:
         buffers = []
@@ -361,41 +365,41 @@ def build_book(selected: pd.DataFrame, pad_odd: bool, forscore_metadata: bool, p
     writer = PdfWriter()
     if setlist_pdf is not None:
         writer.append(PdfReader(io.BytesIO(setlist_pdf)), outline_item="Set list")
-    song_names = selected["song"].tolist()
-    for i, (song, buf) in enumerate(zip(song_names, buffers)):
-        reader = PdfReader(buf)
-        start_page = len(writer.pages)
-        page_count = len(reader.pages)
-        writer.append(reader, outline_item=song)
 
+    def add_blank(reference_page):
+        writer.add_blank_page(
+            width=float(reference_page.mediabox.width),
+            height=float(reference_page.mediabox.height),
+        )
+        if forscore_metadata:
+            idx = len(writer.pages) - 1
+            writer.set_page_label(idx, idx, prefix="Blank")
+
+    readers = [PdfReader(buf) for buf in buffers]
+    for i, (song, reader) in enumerate(zip(selected["song"], readers)):
+        page_count = len(reader.pages)
+        # PDF page 1 is right-hand; even-numbered pages are left-hand.
+        # Multi-page songs must begin on a left-hand (even) page.
+        if book_layout and page_count >= 2 and len(writer.pages) % 2 == 0:
+            add_blank(reader.pages[0])
+
+        start_page = len(writer.pages)
+        writer.append(reader, outline_item=song)
         if forscore_metadata:
             writer.set_page_label(
-                start_page,
-                start_page + page_count - 1,
-                style=PageLabelStyle.DECIMAL,
-                start=1,
+                start_page, start_page + page_count - 1,
+                style=PageLabelStyle.DECIMAL, start=1,
             )
 
-        if pad_odd and page_count % 2 == 1 and i < len(song_names) - 1:
-            first_page = writer.pages[start_page]
-            writer.add_blank_page(
-                width=float(first_page.mediabox.width),
-                height=float(first_page.mediabox.height),
-            )
-            if forscore_metadata:
-                writer.set_page_label(
-                    len(writer.pages) - 1,
-                    len(writer.pages) - 1,
-                    prefix="Blank",
-                )
+        # If the next song is multi-page, its first page must be even.
+        # The check at the beginning of the next iteration inserts any
+        # necessary blank. One-page songs can fill available right pages.
 
     if forscore_metadata:
-        writer.add_metadata(
-            {
-                "/Title": f"Music book - {part}",
-                "/Creator": "Music book builder (Streamlit)",
-            }
-        )
+        writer.add_metadata({
+            "/Title": f"Music book - {part}",
+            "/Creator": "Music book builder (Streamlit)",
+        })
 
     out = io.BytesIO()
     writer.write(out)
@@ -418,22 +422,49 @@ if lib.empty:
     st.warning("No parts found. See Diagnostics above.")
     st.stop()
 
-part_counts = lib["part"].value_counts()
+# Merge the two vocal arrangements into one dropdown choice, counting
+# each song once even when both PDFs exist.
+part_counts = lib.groupby("part")["song"].nunique()
+vocal_parts = {VOCAL_PART, KEYBOARD_PART}
+parts = sorted((set(part_counts.index) - vocal_parts), key=str.lower)
+if any(p in part_counts.index for p in vocal_parts):
+    parts.append(COMBINED_PART)
+parts.sort(key=str.lower)
+combined_count = lib.loc[lib["part"].isin(vocal_parts), "song"].nunique()
+counts = {p: int(part_counts[p]) for p in parts if p != COMBINED_PART}
+if COMBINED_PART in parts:
+    counts[COMBINED_PART] = combined_count
+
 filter_parts = st.checkbox("Show only allowed parts", value=False)
-parts = sorted(part_counts.index, key=str.lower)
 if filter_parts:
     allowed = {p.strip().casefold() for p in ALLOWED_PARTS}
-    parts = [p for p in parts if p.strip().casefold() in allowed]
+    # Either source name, or the combined label, can allow the merged option.
+    parts = [p for p in parts if p.strip().casefold() in allowed or
+             (p == COMBINED_PART and any(v.casefold() in allowed for v in vocal_parts))]
     if not parts:
         st.warning("No available parts match ALLOWED_PARTS. Update the list or turn off the filter.")
         st.stop()
 part = st.selectbox(
-    "Part",
-    parts,
-    index=parts.index(max(parts, key=lambda p: part_counts[p])),
-    format_func=lambda p: f"{p} ({part_counts[p]} songs)",
+    "Part", parts,
+    index=parts.index(max(parts, key=lambda p: counts[p])),
+    format_func=lambda p: f"{p} ({counts[p]} songs)",
 )
-available = lib[lib["part"] == part].sort_values("song", key=lambda s: s.str.lower())
+
+if part == COMBINED_PART:
+    preferred = st.radio(
+        "Preferred vocal arrangement",
+        [KEYBOARD_PART, VOCAL_PART],
+        horizontal=True,
+    )
+    other = VOCAL_PART if preferred == KEYBOARD_PART else KEYBOARD_PART
+    available = lib[lib["part"].isin(vocal_parts)].copy()
+    available["_preference"] = available["part"].map({preferred: 0, other: 1})
+    available = (available.sort_values(["_preference", "song", "file_id"])
+                 .drop_duplicates("song", keep="first")
+                 .drop(columns="_preference")
+                 .sort_values("song", key=lambda x: x.str.lower()))
+else:
+    available = lib[lib["part"] == part].sort_values("song", key=lambda x: x.str.lower())
 
 mode = st.radio("Build from", ["Pick songs", "Set list"], horizontal=True)
 
@@ -538,7 +569,7 @@ else:
 
 st.caption(f"{len(selected)} songs selected")
 
-pad_odd = st.checkbox("Insert blank pages after odd-page songs", value=False)
+book_layout = st.checkbox("Book layout: multi-page songs start on left pages", value=False)
 forscore_metadata = st.checkbox("Experimental forScore title and page labels", value=False)
 include_setlist = (
     st.checkbox("Include current set list as front page", value=True)
@@ -550,7 +581,7 @@ if st.button("Build PDF", disabled=selected.empty, type="primary"):
         setlist_pdf = fetch_setlist_pdf(doc["id"], doc["keys"]) if include_setlist else None
         st.session_state["book"] = (
             part,
-            build_book(selected, pad_odd, forscore_metadata, part, setlist_pdf),
+            build_book(selected, book_layout, forscore_metadata, part, setlist_pdf),
         )
     except (RuntimeError, requests.RequestException) as e:
         st.error(str(e))
