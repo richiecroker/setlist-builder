@@ -19,7 +19,6 @@ ALLOWED_PARTS = ["Soprano Saxophone", "Alto Saxophone 1", "Alto Saxophone 2", "T
 API_KEY = st.secrets["drive_api_key"]
 API = "https://www.googleapis.com/drive/v3/files"
 
-
 FOLDER_MIME = "application/vnd.google-apps.folder"
 DOC_MIME = "application/vnd.google-apps.document"
 SHORTCUT_MIME = "application/vnd.google-apps.shortcut"
@@ -194,17 +193,54 @@ def load_setlists():
 
 
 @st.cache_data(ttl=600, show_spinner="Reading set list...")
-def fetch_doc_text(doc_id, keys):
+def fetch_doc_lines(doc_id, keys):
+    """Read first-column entries from Google Docs tables, in document order."""
     r = requests.get(
-        f"{API}/{doc_id}/export",
-        params={"mimeType": "text/plain", "key": API_KEY},
+        f"https://docs.googleapis.com/v1/documents/{doc_id}",
+        params={"key": API_KEY},
         headers=rk_headers(*keys),
         timeout=30,
     )
     if not r.ok:
-        raise RuntimeError(f"Drive API error {r.status_code}: {r.text}")
-    r.encoding = "utf-8"
-    return r.text.lstrip("\ufeff")
+        raise RuntimeError(
+            f"Google Docs API error {r.status_code}: {r.text[:500]}. "
+            "Check that the Google Docs API is enabled and the document is "
+            "accessible using your API key."
+        )
+    doc = r.json()
+
+    def paragraphs(elements):
+        """Extract text from paragraphs, including nested table content."""
+        lines = []
+        for element in elements:
+            if "paragraph" in element:
+                value = "".join(
+                    run.get("textRun", {}).get("content", "")
+                    for run in element["paragraph"].get("elements", [])
+                ).strip()
+                if value:
+                    lines.extend(value.splitlines())
+            elif "table" in element:
+                for row in element["table"].get("tableRows", []):
+                    for cell in row.get("tableCells", []):
+                        lines.extend(paragraphs(cell.get("content", [])))
+        return lines
+
+    content = doc.get("body", {}).get("content", [])
+    table_entries = []
+    for element in content:
+        table = element.get("table")
+        if table is None:
+            continue
+        for row in table.get("tableRows", []):
+            cells = row.get("tableCells", [])
+            if cells:
+                table_entries.extend(paragraphs(cells[0].get("content", [])))
+
+    # Preserve support for set lists written as ordinary paragraphs.
+    if not any("table" in element for element in content):
+        return paragraphs(content)
+    return table_entries
 
 
 def norm(s):
@@ -422,14 +458,14 @@ else:
         )
     ]
     try:
-        text = fetch_doc_text(doc["id"], doc["keys"])
+        lines = fetch_doc_lines(doc["id"], doc["keys"])
     except RuntimeError as e:
         st.error(str(e))
         st.stop()
 
     index = {norm(s): s for s in lib["song"].unique()}
     matched, unmatched = [], []
-    for raw in text.splitlines():
+    for raw in lines:
         line = clean_line(raw)
         if not line:
             continue
